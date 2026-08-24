@@ -1,0 +1,95 @@
+# A worked example: two agents against a support database.
+#
+# This file is scanned in CI on every commit and must stay free of high-severity
+# findings, so it doubles as a reference for what a policy is supposed to look
+# like once you are done tightening it.
+#
+#   dataweir scan --policy examples/production.yaml --fail-on high
+
+version: 1
+name: support-platform
+default: deny
+mode: enforce
+
+# Findings at or above this severity block the query. Set to `medium` to also
+# stop unbounded reads and wildcard projections outright.
+block_severity: medium
+
+audit:
+  path: ./dataweir-audit.jsonl
+  hash_chain: true
+  redact_params: true
+
+inspect_results: true
+
+classification:
+  sensitive_columns:
+    - "customers.ssn"
+    - "customers.date_of_birth"
+    - "*.password*"
+    - "*.card_number"
+  pii_columns:
+    - "*.email"
+    - "*.phone"
+    - "customers.address"
+
+agents:
+  # A read-only assistant that answers questions about open tickets.
+  - id: support-copilot
+    description: Answers customer questions from ticket and account data.
+    grants:
+      - tables: [tickets, ticket_comments]
+        operations: [select]
+        max_rows: 200
+
+      - tables: [customers]
+        operations: [select]
+        columns:
+          - customers.id
+          - customers.name
+          - customers.tier
+          - customers.created_at
+        deny_columns:
+          - customers.ssn
+          - customers.date_of_birth
+          - customers.email
+          - customers.address
+        max_rows: 25
+        require_where: true
+
+    budgets:
+      rows_per_session: 2000
+      rows_per_minute: 500
+      queries_per_minute: 60
+      sensitive_rows_per_session: 0
+
+    anomaly:
+      enabled: true
+      row_zscore: 4.0
+      min_observations: 20
+      absolute_floor: 50
+
+  # A narrower agent that may write, but only to one table and only with a
+  # WHERE clause, so no single call can rewrite it.
+  - id: triage-bot
+    description: Reprioritises tickets based on SLA breach risk.
+    grants:
+      - tables: [tickets]
+        operations: [select, update]
+        columns:
+          - tickets.id
+          - tickets.priority
+          - tickets.sla_due_at
+          - tickets.status
+        max_rows: 100
+        require_where: true
+
+    budgets:
+      rows_per_session: 1000
+      rows_per_minute: 300
+      queries_per_minute: 30
+
+    anomaly:
+      enabled: true
+      row_zscore: 3.5
+      min_observations: 15
